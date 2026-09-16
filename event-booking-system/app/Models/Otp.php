@@ -12,7 +12,18 @@ class Otp extends Model
         'expires_at',
     ];
 
-    public function user()
+    /**
+     * @return array<string, string>
+     */
+    protected function casts(): array
+    {
+        return [
+            'expires_at' => 'datetime',
+        ];
+    }
+
+
+    public function user(): BelongsTo
     {
         return $this->belongsTo(User::class);
     }

@@ -2,111 +2,156 @@
 
 namespace App\Http\Controllers;
 
-use App\Models\User;
-use App\Models\Otp;
-use App\Http\Requests\RegisterRequest;
 use App\Http\Requests\LoginRequest;
-use Illuminate\Support\Facades\Auth;
-use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Mail;
+use App\Http\Requests\RegisterRequest;
+use App\Http\Requests\VerifyOtpRequest;
 use App\Mail\Otp as OtpMail;
+use App\Models\User;
+use App\Services\OtpService;
+use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Mail;
+use App\Exceptions\TooManyOtpAttemptsException;
+
 class AuthController extends Controller
 {
-    public function register(RegisterRequest $request)
+    private const OTP_TOKEN_NAME = 'otp-verification';
+
+    private const API_TOKEN_NAME = 'api';
+
+    public function __construct(private readonly OtpService $otpService) {}
+
+    /**
+     * Register a new user and issue a token scoped only to OTP verification.
+     */
+    public function register(RegisterRequest $request): JsonResponse
     {
-        $user = User::create($request->validated());
-        $otp = rand(100000, 999999);
-        Otp::create([
-            'user_id' => $user->id,
-            'otp' => $otp,
-            'expires_at' => now()->addMinutes(10),
-        ]);
-        #TODO: send otp
-        Mail::to($user->email)->send(new OtpMail($otp));
+        $user = DB::transaction(function () use ($request): User {
+            $user = User::create($request->validated());
+
+            $code = $this->otpService->generate($user);
+
+            Mail::to($user->email)->queue(new OtpMail($code));
+
+            return $user;
+        });
+
         return response()->json([
-            'message' => 'User created successfully',
+            'message' => 'User created successfully. Please verify your email.',
             'user' => $user,
-            'token' => $user->createToken('api')->plainTextToken,
+            'token' => $this->issueOtpToken($user),
         ], 201);
     }
 
+    /**
+     * Resend the OTP for the authenticated (unverified) user.
+     */
+    public function resendOtp(Request $request): JsonResponse
+    {
+        $user = $request->user();
 
-    
-    public function resendOtp(User $user){
-        if($user->email_verified_at){
-            return response()->json([
-                'message' => 'Email already verified'
-            ], 400);
+        if ($user->hasVerifiedEmail()) {
+            return response()->json(['message' => 'Email already verified'], 409);
         }
-        $otp = $user->otp;
-        $allowedResendTime = $otp?->updated_at?->addMinutes(1) ?? now()->subMinutes();
-        if(!$otp || $otp->expires_at < now() || $allowedResendTime < now()){
-            $newOtp = rand(100000, 999999);
-                Otp::updateOrCreate(
-                    ['user_id' => $user->id],
-                    [
-                        'otp' => $newOtp,
-                        'expires_at' => now()->addMinutes(10),
-                    ]
-                );
-            Mail::to($user->email)->send(new OtpMail($newOtp));
+
+        if (! $this->otpService->canResend($user)) {
             return response()->json([
-                'message' => 'OTP sent successfully',
-            ], 200);
-        }else{
-            return response()->json([
-                'message' => 'you can resend otp after ' . $allowedResendTime->diffForHumans(),
-            ], 400);
+                'message' => 'Please wait before requesting another code.',
+                'retry_after' => $this->otpService->secondsUntilResend($user),
+            ], 429);
         }
+
+        $code = $this->otpService->generate($user);
+
+        Mail::to($user->email)->queue(new OtpMail($code));
+
+        return response()->json(['message' => 'OTP sent successfully']);
     }
-    public function verifyOtp(Request $request,User $user){
-        if($user->email_verified_at){
-            return response()->json([
-                'message' => 'Email already verified'
-            ], 400);
+
+    /**
+     * Verify the OTP, mark the email verified, and swap the scoped token for a full one.
+     */
+    public function verifyOtp(VerifyOtpRequest $request): JsonResponse
+    {
+        $user = $request->user();
+
+        if ($user->hasVerifiedEmail()) {
+            return response()->json(['message' => 'Email already verified'], 409);
         }
-        $otp = $user->otp;
-        $validate = $request->validate([
-            'otp' => 'required|string',
-        ]);
-        if(!$otp || $otp->otp !== $validate['otp'] || $otp->expires_at < now()){
+
+        try {
+            if (! $this->otpService->verify($user, $request->validated('otp'))) {
+                return response()->json([
+                    'message' => 'Invalid or expired OTP',
+                ], 422);
+            }
+        } catch (TooManyOtpAttemptsException $e) {
             return response()->json([
-                'message' => 'Invalid OTP'
-            ], 401);
+                'message' => 'Too many attempts. Please try again later.',
+                'retry_after' => $e->retryAfter,
+            ], 429);
         }
-        $user->update([
-            'email_verified_at' => now(),
-        ]);
-        $otp->delete();
+
+        $user->markEmailAsVerified();
+
+        // Revoke the OTP-scoped token so it cannot be reused.
+        $user->currentAccessToken()->delete();
 
         return response()->json([
             'message' => 'Email verified successfully',
-        ], 200);
+            'user' => $user,
+            'token' => $this->issueApiToken($user),
+        ]);
     }
 
-
-
-    public function login(LoginRequest $request)
+    /**
+     * Authenticate a user. Unverified users receive an OTP-scoped token instead of a full one.
+     */
+    public function login(LoginRequest $request): JsonResponse
     {
-        $user = User::where('email', $request->email)->first();
+        if (! Auth::validate($request->only('email', 'password'))) {
+            return response()->json(['message' => 'Invalid credentials'], 401);
+        }
 
-        if (!Auth::attempt($request->only('email', 'password'))) {
+        $user = User::where('email', $request->validated('email'))->firstOrFail();
+
+        if (! $user->hasVerifiedEmail()) {
             return response()->json([
-                'message' => 'Invalid credentials'
-            ], 401);
-        } elseif(!$user->email_verified_at){
-            return response()->json([
-                'message' => 'Email not verified'
-            ], 401);
+                'message' => 'Email not verified',
+                'token' => $this->issueOtpToken($user),
+            ], 403);
         }
 
 
-        // $user = Auth::user();
+        // $token = $user->createToken(self::API_TOKEN_NAME, ['*'], now()->addHours(1))->plainTextToken;
 
         return response()->json([
             'message' => 'Login successful',
             'user' => $user,
-            'token' => $user->createToken('api', ['*'], now()->addHours(1))->plainTextToken
-        ], 200);
+            'token' => $this->issueApiToken($user),
+        ]);
+    }
+
+    private function issueOtpToken(User $user): string
+    {
+        $user->tokens()->where('name', self::OTP_TOKEN_NAME)->delete();
+
+        return $user->createToken(
+            self::OTP_TOKEN_NAME,
+            ['otp:verify'],
+            now()->addMinutes(5),
+        )->plainTextToken;
+    }
+
+    private function issueApiToken(User $user): string
+    {
+        $user->tokens()->where('name', self::API_TOKEN_NAME)->delete();
+        return $user->createToken(
+            self::API_TOKEN_NAME,
+            ['*'],
+            now()->addHours(1),
+        )->plainTextToken;
     }
 }
