@@ -21,12 +21,12 @@ class CategoryRequest extends FormRequest
      * @return array<string, ValidationRule|array<mixed>|string>
      */
     public function rules(): array
-    {
-        return [
-            'name' => 'required|string|min:3|max:255|unique:categories,name',
-            'description' => 'nullable|string|max:255'
-        ];
-    }
+{
+    return [
+        'name' => 'required|string|min:3|max:255|unique:categories,name,' . $this->category?->id,
+        'description' => 'nullable|string|max:255',
+    ];
+}
     public function messages(): array
     {
         return [

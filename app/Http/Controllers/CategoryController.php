@@ -2,10 +2,10 @@
 
 namespace App\Http\Controllers;
 
-use App\Http\Requests\CategoryRequest;
 use App\Models\Category;
-use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Validator;
+use App\Http\Requests\CategoryRequest;
+use App\Http\Resources\CategoryResource;
+
 
 class CategoryController extends Controller
 {
@@ -14,9 +14,10 @@ class CategoryController extends Controller
      */
     public function index()
     {
-        return response()->json([
-            "categories" => Category::paginate(10)
-        ], 200);
+        $categories = Category::paginate(10);
+        return CategoryResource::collection($categories)
+            ->response()
+            ->setStatusCode(200);
     }
 
     /**
@@ -25,55 +26,45 @@ class CategoryController extends Controller
     public function store(CategoryRequest $request)
     {
         $category = Category::create($request->validated());
-        return response()->json($category, 201);
+        return new CategoryResource($category);
     }
 
     /**
      * Display the specified resource.
      */
-    public function show(string $id)
+    public function show(Category $category)
     {
-        return response()->json(Category::findOrFail($id));
+        $category = Category::find($category->id);
+        return new CategoryResource($category);
     }
 
     /**
      * Update the specified resource in storage.
      */
-    public function update(Request $request, string $id)
+    public function update(CategoryRequest $request, Category $category)
     {
-        $category = Category::findOrFail($id);
-        $categoryRequest = new CategoryRequest();
-        $validator = Validator::make($request->all(), $categoryRequest->rules());
-
         if (
             $category->name === $request->name &&
             $category->description === $request->description
         ) {
             return response()->json([
-                "message" => "Nothing changed.",
+                "message" => "Nothing changed."
             ], 400);
-        } elseif ($validator->fails()) {
-            return response()->json([
-                "message" => $validator->errors(),
-            ], 422);
         }
 
-        $category->update($request->all());
-        return response()->json([
-            "message" => "Category updated successfully",
-            "category" => $category
-        ], 200);
+        $category->update($request->validated());
+        return new CategoryResource($category);
     }
 
     /**
      * Remove the specified resource from storage.
      */
-    public function destroy(string $id)
+    public function destroy(Category $category)
     {
-        $category = Category::findOrFail($id);
+        // $category = Category::findOrFail($category->id);
         $category->delete();
         return response()->json([
-            "message" => "Category deleted successfully"
+            "message" => "Category deleted successfully",
         ], 200);
     }
 }
