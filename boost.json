@@ -10,6 +10,7 @@
     "skills": [
         "infer-conventions",
         "laravel-best-practices",
+        "telescope-debugging",
         "pest-testing",
         "tailwindcss-development"
     ]
