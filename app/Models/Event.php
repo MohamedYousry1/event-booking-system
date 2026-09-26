@@ -23,14 +23,19 @@ class Event extends Model
         'status',
     ];
 
-    public function category() 
+    // cast the start_date and end_date to datetime using carbon
+    protected $casts = [
+        'start_date' => 'datetime',
+        'end_date' => 'datetime',
+    ];
+
+    public function category()
     {
         return $this->belongsTo(Category::class);
     }
 
-    public function bookings() 
+    public function bookings()
     {
         return $this->hasMany(Booking::class);
     }
-    
 }
